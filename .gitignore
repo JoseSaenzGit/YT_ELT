@@ -12,6 +12,7 @@ __pycache__/
 # Environment variables
 .env
 .env.*
+logs/
 
 # OS files
 .DS_Store
@@ -20,3 +21,6 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Output data — extracted from YouTube API, do not push
+data/
