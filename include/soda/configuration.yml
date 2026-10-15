@@ -1,0 +1,32 @@
+# =============================================================================
+# configuration.yml — Conexión de Soda Core a Postgres
+# =============================================================================
+# Le dice a Soda a qué base de datos conectarse. El nombre `pg_datasource` es
+# el que se pasa con -d al ejecutar: soda scan -d pg_datasource ...
+#
+# Las credenciales NO están escritas aquí. Las variables de abajo se leen del
+# entorno del contenedor (las pasa docker-compose.yaml desde el .env), así que
+# este archivo se puede subir a git sin exponer secretos.
+#
+# Dos tipos de variables en este archivo:
+#   - POSTGRES_CONN_HOST, ELT_DATABASE_USERNAME, etc. → variables de ENTORNO.
+#   - SCHEMA → variable de SODA, no de entorno. Se pasa al ejecutar con
+#     `-v SCHEMA=core` (o `-v SCHEMA=staging`). Así un mismo checks.yml sirve
+#     para ambos schemas.
+#
+# ⚠️ NO escribir llaves dólar (signo de dólar + llave) en los comentarios:
+#   Soda reemplaza esas expresiones en TODO el archivo, comentarios incluidos,
+#   y si no son válidas falla con "unexpected '.'" y la fuente de datos no carga.
+#
+# Probar la conexión (test-connection NO acepta el flag -v):
+#   soda test-connection -d pg_datasource -c /opt/airflow/include/soda/configuration.yml
+# =============================================================================
+
+data_source pg_datasource:
+  type: postgres
+  host: ${POSTGRES_CONN_HOST}
+  port: ${POSTGRES_CONN_PORT}
+  username: ${ELT_DATABASE_USERNAME}
+  password: ${ELT_DATABASE_PASSWORD}
+  database: ${ELT_DATABASE_NAME}
+  schema: ${SCHEMA}

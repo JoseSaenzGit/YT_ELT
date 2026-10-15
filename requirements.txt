@@ -1,0 +1,32 @@
+# =============================================================================
+# requirements.txt — YT_ELT Project
+# =============================================================================
+# Este archivo lista los paquetes Python extra que necesita el proyecto,
+# además de Airflow que ya viene incluido en la imagen base del Dockerfile.
+#
+# El Dockerfile lee este archivo con:
+#   pip install -r /requirements.txt
+#
+# Formato de cada línea:
+#   nombre-del-paquete==version   ← versión exacta (recomendado)
+#   nombre-del-paquete            ← última versión disponible
+#
+# Paquetes ya instalados en sesiones anteriores del proyecto:
+#   - requests      → para hacer llamadas HTTP a la API de YouTube
+#   - python-dotenv → para leer variables de entorno desde el archivo .env
+#
+# Paquetes agregados en la sesión de testing (imagen 1.0.1):
+#   - soda-core-postgres → pruebas de calidad de datos contra Postgres
+#                          (comando `soda`; ver include/soda/)
+#   - pytest             → pruebas unitarias en Python
+#
+# IMPORTANTE: pip exige `==` para fijar una versión. Con un solo `=`
+# ("pytest=8.3.2") el build falla con "Invalid requirement".
+# Cada vez que se cambia este archivo hay que reconstruir la imagen
+# (docker build) y subir IMAGE_TAG en el .env.
+#
+# Agregar aquí los paquetes que el tutorial vaya requiriendo.
+# =============================================================================
+
+soda-core-postgres==3.3.14
+pytest==8.3.2

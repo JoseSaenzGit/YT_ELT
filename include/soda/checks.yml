@@ -1,0 +1,53 @@
+# =============================================================================
+# checks.yml — Pruebas de calidad de datos con Soda Core
+# =============================================================================
+# Define las reglas (checks) que Soda ejecuta contra la tabla yt_api.
+# El schema (staging o core) NO está aquí: se elige al ejecutar el scan con
+# la variable SCHEMA, que configuration.yml usa en su línea "schema".
+#
+# Cómo ejecutarlo (dentro del contenedor, ej: docker exec -it airflow-worker bash):
+#   soda scan -d pg_datasource \
+#     -c /opt/airflow/include/soda/configuration.yml \
+#     -v SCHEMA=core \
+#     /opt/airflow/include/soda/checks.yml
+#
+# Resultado de cada check: PASSED, FAILED (el dato incumple la regla) o error
+# (la sintaxis o la query están mal).
+#
+# Reglas de sintaxis YAML que causaron errores en la sesión de testing:
+#   - La indentación es de 2 espacios. Con 1 espacio da "YAML syntax error".
+#   - Los checks personalizados llevan `name:` y `query:` INDENTADOS debajo
+#     del check, no al mismo nivel.
+#   - Los nombres de columna con mayúsculas van entre comillas dobles
+#     ("Likes_Count"); Postgres distingue mayúsculas dentro de comillas.
+# =============================================================================
+
+checks for yt_api:
+
+  # --- Checks incluidos en Soda (no necesitan SQL) ---------------------------
+
+  # Ningún video puede tener el Video_ID vacío (NULL).
+  - missing_count("Video_ID") = 0
+
+  # Ningún Video_ID puede repetirse (es la llave de cada video).
+  - duplicate_count("Video_ID") = 0
+
+  # --- Checks personalizados (con SQL propio) --------------------------------
+  # Soda pasa si la query devuelve el valor indicado (= 0).
+  # La query cuenta las filas que INCUMPLEN la regla: si hay alguna, falla.
+
+  # Un video no puede tener más likes que vistas.
+  - likes_count_greater_than_vid_views = 0:
+      name: Check for Likes_Count greater than Video_Views
+      likes_count_greater_than_vid_views query: |
+        SELECT COUNT(*)
+        FROM yt_api
+        WHERE "Likes_Count" > "Video_Views"
+
+  # Un video no puede tener más comentarios que vistas.
+  - comments_count_greater_than_vid_views = 0:
+      name: Check for Comments_Count greater than Video_Views
+      comments_count_greater_than_vid_views query: |
+        SELECT COUNT(*)
+        FROM yt_api
+        WHERE "Comments_Count" > "Video_Views"

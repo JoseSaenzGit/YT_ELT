@@ -1,0 +1,487 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+# =============================================================================
+# DOCKER COMPOSE — YT_ELT
+# =============================================================================
+# Este archivo define y orquesta TODOS los contenedores del proyecto con un
+# solo comando: docker compose up -d
+#
+# Contenedores que levanta:
+#   1. postgres          → Base de datos (3 BDs: metadata, celery, elt)
+#   2. redis             → Mensajería entre scheduler y workers
+#   3. airflow-webserver → UI accesible en http://localhost:8080
+#   4. airflow-scheduler → Orquestador que decide cuándo correr cada DAG
+#   5. airflow-worker    → Ejecuta las tareas de los DAGs
+#   6. airflow-init      → Corre UNA vez al inicio para hacer el setup inicial
+# =============================================================================
+
+---
+
+# =============================================================================
+# SECCIÓN: x-airflow-common (PLANTILLA COMPARTIDA)
+# =============================================================================
+# Todo lo que está aquí se COMPARTE entre los contenedores de Airflow:
+# webserver, scheduler, worker e init.
+# En vez de repetir la misma configuración 4 veces, se define una sola vez
+# aquí y los demás la heredan con: <<: *airflow-common
+# Esto se llama "YAML anchors" — &airflow-common define la plantilla,
+# *airflow-common la usa.
+# =============================================================================
+x-airflow-common:
+  &airflow-common
+  # Imagen Docker personalizada construida sobre la base de Airflow.
+  # Las variables ${...} se leen del archivo .env que está en la misma carpeta.
+  # Resultado: josesaenzpersonal/yt_api_elt:1.0.1 (según IMAGE_TAG en el .env)
+  # Al cambiar IMAGE_TAG hay que recrear los contenedores:
+  #   docker compose up -d --force-recreate
+  image: ${DOCKERHUB_NAMESPACE}/${DOCKERHUB_REPOSITORY}:${IMAGE_TAG}
+
+  # Lee todas las variables del archivo .env para no hardcodear credenciales.
+  # NOTA: Desactivar esto cuando se use GitHub Actions (CI/CD).
+  env_file:
+    - .env
+
+  environment:
+    # Referencia a este bloque de variables para poder heredarlas en los workers
+    &airflow-common-env
+
+    # --- EXECUTOR ---
+    # CeleryExecutor permite distribuir tareas entre múltiples workers.
+    # Alternativas: SequentialExecutor (1 tarea a la vez), LocalExecutor (sin Redis).
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+
+    # --- BASE DE DATOS DE METADATA DE AIRFLOW ---
+    # Aquí Airflow guarda su estado: DAGs, ejecuciones, logs, conexiones, etc.
+    # Formato: postgresql+psycopg2://usuario:password@host:puerto/nombre_bd
+    # psycopg2 es el driver Python para conectarse a Postgres.
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${METADATA_DATABASE_USERNAME}:${METADATA_DATABASE_PASSWORD}@${POSTGRES_CONN_HOST}:${POSTGRES_CONN_PORT}/${METADATA_DATABASE_NAME}
+
+    # --- BASE DE DATOS DE RESULTADOS DE CELERY ---
+    # Celery guarda aquí los resultados de cada tarea ejecutada por los workers.
+    # Formato: db+postgresql://usuario:password@host:puerto/nombre_bd
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${CELERY_BACKEND_USERNAME}:${CELERY_BACKEND_PASSWORD}@${POSTGRES_CONN_HOST}:${POSTGRES_CONN_PORT}/${CELERY_BACKEND_NAME}
+
+    # --- REDIS (BROKER DE MENSAJES) ---
+    # Redis actúa como intermediario: el scheduler envía tareas a Redis,
+    # y los workers las recogen de ahí para ejecutarlas.
+    # Formato: redis://:@nombre_servicio:puerto/numero_db
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+
+    # --- FERNET KEY ---
+    # Clave de encriptación para proteger contraseñas y credenciales
+    # almacenadas en la base de datos de Airflow.
+    AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY}
+
+    # --- CONFIGURACIÓN GENERAL DE AIRFLOW ---
+    # Los DAGs nuevos empiezan pausados (no corren automáticamente al crearse)
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    # Desactiva los DAGs de ejemplo que trae Airflow por defecto (mantiene la UI limpia)
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    # Habilita autenticación básica y por sesión para la API REST de Airflow
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    # Habilita el health check del scheduler (para saber si está vivo)
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+
+    # -------------------------------------------------------------------------
+    # CONEXIONES Y VARIABLES DE AIRFLOW
+    # -------------------------------------------------------------------------
+    # NOTA 1: Estas variables NO aparecen en la UI de Airflow ni en
+    #         "airflow connections list", pero SÍ funcionan en el código
+    #         con Variable.get() y BaseHook.get_connection().
+    # NOTA 2: Se usan guiones bajos simples (no dobles) para que Airflow
+    #         las reconozca correctamente.
+    #
+    # CONEXIONES → formato: AIRFLOW_CONN_{ID_DE_CONEXION}='tipo://usuario:password@host:puerto/schema'
+    # La conexión a la BD de Postgres donde se guardarán los datos de YouTube.
+    # En los DAGs se referencia con conn_id='POSTGRES_DB_YT_ELT'
+    AIRFLOW_CONN_POSTGRES_DB_YT_ELT: 'postgresql://${ELT_DATABASE_USERNAME}:${ELT_DATABASE_PASSWORD}@${POSTGRES_CONN_HOST}:${POSTGRES_CONN_PORT}/${ELT_DATABASE_NAME}'
+
+    # VARIABLES → formato: AIRFLOW_VAR_{NOMBRE_VARIABLE}
+    # En los DAGs se acceden con: Variable.get("API_KEY") y Variable.get("CHANNEL_HANDLE")
+    AIRFLOW_VAR_API_KEY: ${API_KEY}
+    AIRFLOW_VAR_CHANNEL_HANDLE: ${CHANNEL_HANDLE}
+
+    # Variables de Postgres expuestas como env vars dentro del contenedor.
+    # Necesarias para los tests de integración y calidad de datos.
+    ELT_DATABASE_NAME: ${ELT_DATABASE_NAME}
+    ELT_DATABASE_USERNAME: ${ELT_DATABASE_USERNAME}
+    ELT_DATABASE_PASSWORD: ${ELT_DATABASE_PASSWORD}
+    POSTGRES_CONN_HOST: ${POSTGRES_CONN_HOST}
+    POSTGRES_CONN_PORT: ${POSTGRES_CONN_PORT}
+
+  # ---------------------------------------------------------------------------
+  # VOLÚMENES — MOUNTING (espejo entre tu Mac y el contenedor)
+  # ---------------------------------------------------------------------------
+  # Formato: ./carpeta_local:/ruta/dentro/del/contenedor
+  # El contenido de la izquierda (Mac) se mapea en tiempo real a la derecha
+  # (contenedor). Si editas un DAG en tu Mac, Airflow lo ve al instante.
+  volumes:
+    - ./config:/opt/airflow/config     # Configuraciones de Airflow
+    - ./dags:/opt/airflow/dags         # Aquí van los DAGs (pipelines)
+    - ./data:/opt/airflow/data         # Datos del ELT (JSONs de YouTube)
+    - ./include:/opt/airflow/include   # Archivos SQL u otros recursos
+    - ./logs:/opt/airflow/logs         # Logs de ejecución de los DAGs
+    - ./plugins:/opt/airflow/plugins   # Plugins personalizados de Airflow
+    - ./tests:/opt/airflow/tests       # Tests de integración y calidad
+
+  # El contenedor corre con el usuario AIRFLOW_UID (50000) para evitar
+  # problemas de permisos con los archivos montados desde el Mac.
+  user: "${AIRFLOW_UID}:0"
+
+  # Airflow NO arranca hasta que postgres Y redis estén "healthy".
+  # Sin esto, Airflow intentaría conectarse a BDs que aún no existen y fallaría.
+  depends_on:
+    &airflow-common-depends-on
+    redis:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+
+
+# =============================================================================
+# SECCIÓN: services (LOS CONTENEDORES)
+# =============================================================================
+services:
+
+  # ---------------------------------------------------------------------------
+  # SERVICIO: postgres
+  # ---------------------------------------------------------------------------
+  # Un solo contenedor con 3 bases de datos dentro:
+  #   1. airflow_metadata_db  → estado interno de Airflow
+  #   2. celery_results_db    → resultados de tareas ejecutadas por workers
+  #   3. elt_db               → datos extraídos de la API de YouTube
+  # Las 3 BDs se crean automáticamente mediante init-multiple-databases.sh
+  # ---------------------------------------------------------------------------
+  postgres:
+    container_name: postgres
+    image: postgres:13
+    # Lee credenciales del .env. DESACTIVAR cuando se use GitHub Actions.
+    env_file:
+      - .env
+    # Usuario y contraseña raíz de Postgres (el superusuario del servidor).
+    # Las credenciales de cada BD individual las maneja el script de init.
+    # Las líneas comentadas son para CI/CD con GitHub Actions.
+    environment:
+      - POSTGRES_USER=${POSTGRES_CONN_USERNAME}
+      - POSTGRES_PASSWORD=${POSTGRES_CONN_PASSWORD}
+    #   - METADATA_DATABASE_NAME=${METADATA_DATABASE_NAME}
+    #   - METADATA_DATABASE_USERNAME=${METADATA_DATABASE_USERNAME}
+    #   - METADATA_DATABASE_PASSWORD=${METADATA_DATABASE_PASSWORD}
+    #   - ELT_DATABASE_NAME=${ELT_DATABASE_NAME}
+    #   - ELT_DATABASE_USERNAME=${ELT_DATABASE_USERNAME}
+    #   - ELT_DATABASE_PASSWORD=${ELT_DATABASE_PASSWORD}
+    #   - CELERY_BACKEND_NAME=${CELERY_BACKEND_NAME}
+    #   - CELERY_BACKEND_USERNAME=${CELERY_BACKEND_USERNAME}
+    #   - CELERY_BACKEND_PASSWORD=${CELERY_BACKEND_PASSWORD}
+    #   - POSTGRES_CONN_HOST=${POSTGRES_CONN_HOST}
+    #   - POSTGRES_CONN_PORT=${POSTGRES_CONN_PORT}
+    # Puerto 5432 del Mac mapeado al 5432 del contenedor (puerto estándar de Postgres).
+    # Esto permite conectarte desde tu Mac con DBeaver, TablePlus, etc.
+    ports:
+      - 5432:5432
+    volumes:
+      # PERSISTENCIA: volumen nombrado que guarda los datos de Postgres en tu Mac.
+      # Si eliminas el contenedor, los datos NO se pierden (viven en este volumen).
+      # ⚠️ Si cambias credenciales en .env DESPUÉS de haber levantado los contenedores,
+      # debes borrar este volumen: docker volume rm yt_elt_postgres-db-volume
+      - postgres-db-volume:/var/lib/postgresql/data
+      # MOUNTING: monta el script de inicialización dentro del contenedor.
+      # Postgres ejecuta automáticamente cualquier .sh en /docker-entrypoint-initdb.d/
+      # al arrancar por primera vez → crea las 3 BDs y sus usuarios.
+      # ⚠️ El script necesita permisos de ejecución: chmod +x docker/postgres/init-multiple-databases.sh
+      - ./docker/postgres/init-multiple-databases.sh:/docker-entrypoint-initdb.d/init-multiple-databases.sh
+    # Verifica que Postgres esté listo probando conexión a la BD de metadata.
+    # Airflow no arrancará hasta que este check pase (depends_on: condition: service_healthy).
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_CONN_USERNAME}", "-d", "${METADATA_DATABASE_NAME}"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    # Si el contenedor se cae por cualquier razón, Docker lo reinicia automáticamente.
+    restart: always
+
+  # ---------------------------------------------------------------------------
+  # SERVICIO: redis
+  # ---------------------------------------------------------------------------
+  # Broker de mensajes para CeleryExecutor.
+  # Funciona como un buzón: el scheduler deposita tareas, los workers las recogen.
+  # Versión limitada a 7.2-bookworm por cambio de licencia en versiones superiores.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7.2-bookworm
+    container_name: redis
+    # expose: hace el puerto accesible solo entre contenedores (no desde el Mac).
+    # A diferencia de ports:, no expone el puerto al exterior.
+    expose:
+      - 6379
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 30s
+      retries: 50
+      start_period: 30s
+    restart: always
+
+  # ---------------------------------------------------------------------------
+  # SERVICIO: airflow-webserver
+  # ---------------------------------------------------------------------------
+  # La interfaz gráfica de Airflow. Accesible en http://localhost:8080
+  # Hereda toda la configuración de x-airflow-common (<<: *airflow-common).
+  # ---------------------------------------------------------------------------
+  airflow-webserver:
+    <<: *airflow-common          # Hereda imagen, env vars, volúmenes, depends_on
+    command: webserver           # Comando que corre dentro del contenedor al arrancar
+    container_name: airflow-webserver
+    ports:
+      - "8080:8080"              # Puerto del Mac : Puerto del contenedor
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      # Además de redis y postgres, espera a que airflow-init termine exitosamente.
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ---------------------------------------------------------------------------
+  # SERVICIO: airflow-scheduler
+  # ---------------------------------------------------------------------------
+  # El "cerebro" de Airflow. Monitorea los DAGs y decide cuándo deben correr
+  # según su schedule. Envía las tareas a Redis para que los workers las ejecuten.
+  # ---------------------------------------------------------------------------
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    container_name: airflow-scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ---------------------------------------------------------------------------
+  # SERVICIO: airflow-worker
+  # ---------------------------------------------------------------------------
+  # El "empleado" de Airflow. Recoge tareas de Redis y las ejecuta.
+  # Se puede tener múltiples workers para ejecutar tareas en paralelo.
+  # Para agregar un segundo worker: copiar este bloque y llamarlo airflow-worker-2.
+  # ---------------------------------------------------------------------------
+  airflow-worker:
+    <<: *airflow-common
+    command: celery worker
+    container_name: airflow-worker
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        # Verifica que el worker de Celery esté respondiendo (ping)
+        - 'celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}" || celery --app airflow.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    environment:
+      <<: *airflow-common-env
+      # Necesario para que el worker maneje correctamente el apagado gradual (SIGTERM).
+      # Evita que las tareas en ejecución se corten abruptamente al hacer docker compose down.
+      DUMB_INIT_SETSID: "0"
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ---------------------------------------------------------------------------
+  # SERVICIO: airflow-triggerer (DESACTIVADO)
+  # ---------------------------------------------------------------------------
+  # Maneja tareas diferidas (Deferrable Operators). No lo necesitamos en este
+  # proyecto porque no usamos tareas de ese tipo.
+  # ---------------------------------------------------------------------------
+  # airflow-triggerer:
+  #   <<: *airflow-common
+  #   command: triggerer
+  #   container_name: airflow-triggerer
+  #   healthcheck:
+  #     test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 5
+  #     start_period: 30s
+  #   restart: always
+  #   depends_on:
+  #     <<: *airflow-common-depends-on
+  #     airflow-init:
+  #       condition: service_completed_successfully
+
+  # ---------------------------------------------------------------------------
+  # SERVICIO: airflow-init
+  # ---------------------------------------------------------------------------
+  # Contenedor de inicialización que corre UNA SOLA VEZ al hacer docker compose up.
+  # Se encarga de:
+  #   1. Verificar recursos del sistema (RAM, CPU, disco)
+  #   2. Crear carpetas necesarias (dags, data, logs, etc.)
+  #   3. Migrar la BD de metadata (_AIRFLOW_DB_MIGRATE)
+  #   4. Crear el usuario administrador para la UI (_AIRFLOW_WWW_USER_CREATE)
+  # Después de terminar, el contenedor aparece como "Exited" — eso es NORMAL.
+  # ---------------------------------------------------------------------------
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    container_name: airflow-init
+    command:
+      - -c
+      - |
+        if [[ -z "${AIRFLOW_UID}" ]]; then
+          echo
+          echo -e "\033[1;33mWARNING!!!: AIRFLOW_UID not set!\e[0m"
+          echo "If you are on Linux, you SHOULD follow the instructions below to set "
+          echo "AIRFLOW_UID environment variable, otherwise files will be owned by root."
+          echo "For other operating systems you can get rid of the warning with manually created .env file:"
+          echo "    See: https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html#setting-the-right-airflow-user"
+          echo
+        fi
+        one_meg=1048576
+        mem_available=$$(($$(getconf _PHYS_PAGES) * $$(getconf PAGE_SIZE) / one_meg))
+        cpus_available=$$(grep -cE 'cpu[0-9]+' /proc/stat)
+        disk_available=$$(df / | tail -1 | awk '{print $$4}')
+        warning_resources="false"
+        if (( mem_available < 4000 )) ; then
+          echo
+          echo -e "\033[1;33mWARNING!!!: Not enough memory available for Docker.\e[0m"
+          echo "At least 4GB of memory required. You have $$(numfmt --to iec $$((mem_available * one_meg)))"
+          echo
+          warning_resources="true"
+        fi
+        if (( cpus_available < 2 )); then
+          echo
+          echo -e "\033[1;33mWARNING!!!: Not enough CPUS available for Docker.\e[0m"
+          echo "At least 2 CPUs recommended. You have $${cpus_available}"
+          echo
+          warning_resources="true"
+        fi
+        if (( disk_available < one_meg * 10 )); then
+          echo
+          echo -e "\033[1;33mWARNING!!!: Not enough Disk space available for Docker.\e[0m"
+          echo "At least 10 GBs recommended. You have $$(numfmt --to iec $$((disk_available * 1024 )))"
+          echo
+          warning_resources="true"
+        fi
+        if [[ $${warning_resources} == "true" ]]; then
+          echo
+          echo -e "\033[1;33mWARNING!!!: You have not enough resources to run Airflow (see above)!\e[0m"
+          echo "Please follow the instructions to increase amount of resources available:"
+          echo "   https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html#before-you-begin"
+          echo
+        fi
+        mkdir -p /sources/dags /sources/data /sources/include /sources/logs /sources/tests
+        chown -R "${AIRFLOW_UID}:0" /sources/{dags,data,include,logs,tests}
+        exec /entrypoint airflow version
+    # yamllint enable rule:line-length
+    environment:
+      <<: *airflow-common-env
+      # Ejecuta las migraciones de BD al arrancar (crea las tablas de Airflow)
+      _AIRFLOW_DB_MIGRATE: 'true'
+      # Crea el usuario admin para la UI de Airflow
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      # Credenciales del usuario admin (definidas en el .env)
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_WWW_USER_USERNAME}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_WWW_USER_PASSWORD}
+    # Corre como root (usuario 0) para poder crear carpetas y asignar permisos
+    user: "0:0"
+    volumes:
+      # Monta el directorio raíz del proyecto como /sources dentro del contenedor
+      # para que pueda crear las carpetas dags, logs, etc. con los permisos correctos
+      - .:/sources
+
+  # ---------------------------------------------------------------------------
+  # SERVICIO: airflow-cli
+  # ---------------------------------------------------------------------------
+  # Contenedor para ejecutar comandos de Airflow desde la terminal.
+  # Solo se activa cuando se usa el perfil "debug":
+  #   docker compose --profile debug up
+  # Útil para depurar DAGs o ejecutar comandos de Airflow manualmente.
+  # ---------------------------------------------------------------------------
+  airflow-cli:
+    <<: *airflow-common
+    profiles:
+      - debug
+    environment:
+      <<: *airflow-common-env
+      CONNECTION_CHECK_MAX_COUNT: "0"
+    # Workaround para problema conocido con el entrypoint de Airflow
+    # https://github.com/apache/airflow/issues/16252
+    command:
+      - bash
+      - -c
+      - airflow
+
+  # ---------------------------------------------------------------------------
+  # SERVICIO: flower (DESACTIVADO)
+  # ---------------------------------------------------------------------------
+  # Herramienta de monitoreo para Celery. Muestra el estado de los workers
+  # y las tareas en tiempo real. Accesible en http://localhost:5555
+  # Para activar: docker compose --profile flower up
+  # No se cubre en este curso.
+  # ---------------------------------------------------------------------------
+  # flower:
+  #   <<: *airflow-common
+  #   command: celery flower
+  #   container_name: airflow-celery-flower
+  #   profiles:
+  #     - flower
+  #   ports:
+  #     - "5555:5555"
+  #   healthcheck:
+  #     test: ["CMD", "curl", "--fail", "http://localhost:5555/"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 5
+  #     start_period: 30s
+  #   restart: always
+  #   depends_on:
+  #     <<: *airflow-common-depends-on
+  #     airflow-init:
+  #       condition: service_completed_successfully
+
+# =============================================================================
+# SECCIÓN: volumes (VOLÚMENES NOMBRADOS)
+# =============================================================================
+# Los volúmenes nombrados son gestionados por Docker y persisten aunque el
+# contenedor se elimine. Aquí se declaran para que Docker los cree.
+#
+# ⚠️ ADVERTENCIA: Si cambias credenciales en el .env después de haber
+# levantado los contenedores, debes borrar este volumen antes de volver
+# a hacer docker compose up, de lo contrario Postgres rechazará las
+# nuevas credenciales porque el volumen tiene las anteriores almacenadas.
+#
+# Cómo borrar el volumen:
+#   docker volume rm yt_elt_postgres-db-volume
+# O desde Docker Desktop: Volumes → yt_elt_postgres-db-volume → Delete
+# =============================================================================
+volumes:
+  postgres-db-volume:

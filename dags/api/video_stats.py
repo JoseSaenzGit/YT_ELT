@@ -19,68 +19,91 @@
 #   7. Paginación con nextPageToken en la YouTube Data API v3
 #   8. Procesamiento en lotes (batching) para respetar límites de la API
 #   9. Escritura de archivos JSON con la librería json
+#  10. TaskFlow API de Airflow con el decorador @task
+#  11. Airflow Variables como reemplazo del .env en contenedores
 #
-# FLUJO DEL SCRIPT:
-#   get_playlist_id()
+# FLUJO DEL DAG (TaskFlow API):
+#   get_playlist_id()          → @task — obtiene playlistId del canal
 #       └── Endpoint: /youtube/v3/channels
 #       └── Retorna: playlistId (str)
-#            ↓
-#   get_video_ids(playlistId)
+#            ↓  [Airflow pasa el resultado via XCom automáticamente]
+#   get_video_ids(playlistId)  → @task — pagina todos los videoIds
 #       └── Endpoint: /youtube/v3/playlistItems
 #       └── Pagina con nextPageToken hasta agotar resultados
 #       └── Retorna: lista de videoIds (list[str])
-#            ↓
-#   extract_video_data(video_ids)
+#            ↓  [Airflow pasa el resultado via XCom automáticamente]
+#   extract_video_data(ids)    → @task — extrae métricas por video
 #       └── Endpoint: /youtube/v3/videos
 #       └── Procesa los IDs en lotes de 50 (límite de la API)
 #       └── Retorna: lista de dicts con métricas por video (list[dict])
-#            ↓
-#   save_to_json(extracted_data)
+#            ↓  [Airflow pasa el resultado via XCom automáticamente]
+#   save_to_json(data)         → @task — guarda resultado en JSON
 #       └── Crea carpeta ./data/ si no existe
 #       └── Guarda el archivo: ./data/YT_data_YYYY-MM-DD.json
 # ============================================================
 
-from datetime import date
-import statistics
+import os
 import requests
 import json
-
-
-import os
-from dotenv import load_dotenv  # pip install python-dotenv
+from datetime import date
 
 # ----------------------------------------------------------
-# CARGA DEL ARCHIVO .env
+# IMPORTS DE AIRFLOW
 # ----------------------------------------------------------
-# load_dotenv() lee el archivo .env que está en el mismo
-# directorio y carga sus variables al entorno del proceso.
-# DEBE llamarse ANTES de cualquier os.getenv() para que
-# las variables estén disponibles.
+# SESIÓN 9: Se reemplazaron os + python-dotenv por imports de Airflow.
 #
-# ¿Por qué usamos .env?
-#   - Evita hardcodear credenciales en el código fuente.
-#   - El archivo .env está en .gitignore → nunca se sube a git.
-#   - Cada desarrollador tiene su propio .env local.
+# @task (from airflow.decorators):
+#   Decorador del TaskFlow API. Convierte una función Python normal
+#   en una Tarea de Airflow. Airflow se encarga de:
+#     - Ejecutar cada @task en el orden correcto.
+#     - Pasar los resultados entre tareas via XCom (sin código extra).
+#     - Reintentar la tarea si falla (según default_args).
+#
+# Variable (from airflow.models):
+#   Sistema de configuración de Airflow guardado en Postgres.
+#   Reemplaza al archivo .env — funciona dentro de contenedores Docker.
+#   Se administra desde la UI: Admin → Variables
+#   Variable.get("CLAVE") → lee el valor de la variable "CLAVE".
 # ----------------------------------------------------------
-load_dotenv(dotenv_path="./.env")
+from airflow.decorators import task
+from airflow.models import Variable
+
 
 # ----------------------------------------------------------
-# VARIABLES DE CONFIGURACIÓN
+# VARIABLES DE CONFIGURACIÓN — Airflow Variables
 # ----------------------------------------------------------
-# os.getenv("API_KEY") lee la variable API_KEY del entorno.
-# Si .env contiene:  API_KEY=tu_clave_aqui
-# entonces API_KEY valdrá esa cadena en tiempo de ejecución.
-# Si load_dotenv() no fue llamado antes, retorna None.
-API_KEY = os.getenv("API_KEY")
-
-# Handle del canal de YouTube a consultar.
-# Se puede cambiar por cualquier canal (ej: "@Fireship", "@TechWithTim")
-CHANNEL_HANDLE = "MrBeast"
+# SESIÓN 9: Se migró de os.getenv() a Variable.get() de Airflow.
+#
+# ¿Por qué este cambio?
+#   Dentro de un contenedor Docker, Airflow no tiene acceso al
+#   archivo .env de tu Mac. En cambio, Variable.get() lee desde
+#   la base de datos Postgres que sí está disponible para todos
+#   los contenedores del docker-compose.
+#
+# ¿Cómo se crean estas variables?
+#   En la UI de Airflow → Admin → Variables → botón "+"
+#   Key: API_KEY        Value: tu_api_key_aqui
+#   Key: CHANNEL_HANDLE Value: MrBeast
+#
+# Antes (script local):          Ahora (DAG de Airflow):
+#   os.getenv("API_KEY")    →      Variable.get("API_KEY")
+#   os.getenv("CHANNEL...")  →      Variable.get("CHANNEL_HANDLE")
+# ----------------------------------------------------------
+API_KEY = Variable.get("API_KEY")
+CHANNEL_HANDLE = Variable.get("CHANNEL_HANDLE")
 
 maxResults = 50
 
 
-
+# ----------------------------------------------------------
+# TAREA 1: get_playlist_id
+# ----------------------------------------------------------
+# @task convierte esta función en una Tarea de Airflow.
+# Cuando Airflow ejecuta el DAG, esta es la primera tarea
+# que corre. Su valor de retorno (playlistId) se pasa
+# automáticamente a get_video_ids() via XCom.
+# ----------------------------------------------------------
+@task
 def get_playlist_id():
     """
     Llama a la YouTube Data API v3 para obtener el ID de la
@@ -139,6 +162,14 @@ def get_playlist_id():
         raise e
 
 
+# ----------------------------------------------------------
+# TAREA 2: get_video_ids
+# ----------------------------------------------------------
+# @task convierte esta función en la segunda Tarea del DAG.
+# Recibe el playlistId retornado por get_playlist_id() via XCom.
+# Su resultado (lista de videoIds) se pasa a extract_video_data().
+# ----------------------------------------------------------
+@task
 def get_video_ids(playlistId):
     """
     Obtiene todos los IDs de videos de una playlist de YouTube,
@@ -223,6 +254,14 @@ def get_video_ids(playlistId):
         raise e
 
 
+# ----------------------------------------------------------
+# TAREA 3: extract_video_data
+# ----------------------------------------------------------
+# @task convierte esta función en la tercera Tarea del DAG.
+# Recibe la lista de videoIds retornada por get_video_ids() via XCom.
+# Su resultado (lista de dicts con métricas) se pasa a save_to_json().
+# ----------------------------------------------------------
+@task
 def extract_video_data(video_ids):
     """
     Obtiene métricas detalladas de una lista de videoIds usando la
@@ -300,10 +339,10 @@ def extract_video_data(video_ids):
 
             # Extrae y estructura los campos de cada video del lote
             for item in data.get('items', []):
-                video_id     = item['id']
-                snippet      = item['snippet']
+                video_id       = item['id']
+                snippet        = item['snippet']
                 contentDetails = item['contentDetails']
-                statistics   = item['statistics']
+                statistics     = item['statistics']
 
                 # Construye un diccionario plano con los campos que nos interesan.
                 # statistics.get(..., None) evita KeyError si el canal ocultó ese dato.
@@ -327,6 +366,14 @@ def extract_video_data(video_ids):
         raise e
 
 
+# ----------------------------------------------------------
+# TAREA 4: save_to_json
+# ----------------------------------------------------------
+# @task convierte esta función en la última Tarea del DAG.
+# Recibe la lista de dicts retornada por extract_video_data() via XCom.
+# No retorna nada — es el paso final del pipeline.
+# ----------------------------------------------------------
+@task
 def save_to_json(extracted_data):
     """
     Guarda la lista de métricas de videos en un archivo JSON local.
