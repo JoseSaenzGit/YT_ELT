@@ -94,6 +94,15 @@ jobs:
                 for DAG in "${DAG_NAMES[@]}"; do
                   docker exec -t airflow-worker sh -c "airflow dags test $DAG"
                 done
+        - name: Diagnostico si falla
+          if: failure()
+          run: |
+                free -m
+                docker ps -a
+                docker inspect airflow-worker --format 'OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}} Restarts={{.RestartCount}}'
+                docker stats --no-stream
+                sudo dmesg | grep -i -E "out of memory|killed process" || echo "dmesg: sin eventos OOM"
+                docker logs airflow-worker --tail 40
         - name: Tear down Docker Compose
           if: steps.changed-files-tests.outputs.any_changed == 'true'
           run: docker compose down
