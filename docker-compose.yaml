@@ -485,6 +485,13 @@ services:
 # =============================================================================
 volumes:
   postgres-db-volume:
+# -----------------------------------------------------------------------------
+# NOTA CI/CD: las líneas "# CI trigger N" de abajo NO hacen nada. Son comentarios
+# añadidos solo para que un push cambie este archivo y el workflow
+# (.github/workflows/ci-cd_yt.yaml) ejecute el job de pruebas, porque su filtro
+# `changed-files` solo reacciona a dags/**, include/** y docker-compose.yaml.
+# Se pueden borrar cuando ya no se necesiten.
+# -----------------------------------------------------------------------------
 # CI trigger
 # CI trigger 2
 # CI trigger 3

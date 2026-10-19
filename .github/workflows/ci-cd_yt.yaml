@@ -1,5 +1,25 @@
+# =============================================================================
+# CI-CD Pipeline — YT_ELT
+# =============================================================================
+# Dos jobs, uno detrás del otro:
+#   1. build-and-push-image  → construye la imagen Docker y la sube a Docker Hub
+#                              (solo si cambió `dockerfile` o `requirements.txt`).
+#   2. unit-and-integration-and-e2e-test → levanta el stack con docker compose y corre:
+#        - pytest (pruebas unitarias y de integración)
+#        - `airflow dags test` de los 3 DAGs (prueba end-to-end)
+#                              (solo si cambió `dags/**`, `include/**` o `docker-compose.yaml`).
+#
+# IMPORTANTE para entender los resultados:
+#   - "Re-run" repite el MISMO commit con el workflow de ese commit. Solo recoge
+#     valores nuevos de Secrets/Variables. Si cambias este archivo, hace falta
+#     commit + push nuevos.
+#   - Si un push solo toca este archivo, `changed-files` da false y los pasos
+#     condicionados se saltan EN VERDE sin probar nada. Para forzar las pruebas
+#     hay que tocar docker-compose.yaml (por eso hay comentarios "# CI trigger").
+# =============================================================================
 name: CI-CD Pipeline
 
+# Cuándo se dispara el workflow.
 on:
   push:
     branches:
@@ -8,14 +28,23 @@ on:
   pull_request:
     branches:
       - main
+  # Permite lanzarlo a mano desde la pestaña Actions de GitHub.
   workflow_dispatch:
 
 jobs:
+    # -------------------------------------------------------------------------
+    # JOB 1: construir y publicar la imagen en Docker Hub
+    # -------------------------------------------------------------------------
     build-and-push-image:
       runs-on: ubuntu-latest
       steps:
+        # El runner nace vacío: esto copia el repositorio dentro de él.
         - name: Checkout code
           uses: actions/checkout@v7
+        # Detecta si cambiaron `dockerfile` o `requirements.txt`.
+        # Guarda el resultado en steps.changed-files-build.outputs.any_changed.
+        # Va fijada por SHA (no por tag) por el incidente CVE-2025-30066.
+        # El nombre es `dockerfile` en minúscula: Linux distingue mayúsculas.
         - name: Get changed files
           id: changed-files-build
           uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.6
@@ -23,15 +52,23 @@ jobs:
             files: |
                     dockerfile
                     requirements.txt
+        # Los 3 pasos siguientes solo corren si hubo cambios en esos archivos.
         - name: Set up Docker Buildx
           if: steps.changed-files-build.outputs.any_changed == 'true'
           uses: docker/setup-buildx-action@v4
+        # vars.* = Variables de GitHub (no sensibles); secrets.* = Secrets (ocultos).
+        # DOCKERHUB_USERNAME debe ser el usuario de Docker Hub (josesaenzpersonal),
+        # no el de GitHub. Idealmente DOCKERHUB_PASSWORD es un Access Token.
         - name: Login in to DockerHub
           if: steps.changed-files-build.outputs.any_changed == 'true'
           uses: docker/login-action@v4
           with:
             username: ${{vars.DOCKERHUB_USERNAME}}
             password: ${{secrets.DOCKERHUB_PASSWORD}}
+        # Construye y sube la imagen con dos tags: `latest` (la que pide el
+        # docker-compose.yaml) y el SHA del commit (para poder volver atrás).
+        # `--file dockerfile` porque Docker busca `Dockerfile` por defecto.
+        # El `.` final es el contexto de build. La `\` debe ser lo último de la línea.
         - name: Build and push Docker Image
           if: steps.changed-files-build.outputs.any_changed == 'true'
           run: |
@@ -41,9 +78,24 @@ jobs:
                  --tag ${{vars.DOCKERHUB_NAMESPACE}}/${{vars.DOCKERHUB_REPOSITORY}}:${{github.sha}} \
                  .
 
+    # -------------------------------------------------------------------------
+    # JOB 2: levantar el stack y correr las pruebas
+    # -------------------------------------------------------------------------
     unit-and-integration-and-e2e-test:
       runs-on: ubuntu-latest
+      # Espera a que el job 1 termine bien (la imagen `latest` debe existir).
       needs: build-and-push-image
+      # En GitHub no existe el archivo .env (está en .gitignore). Estas variables
+      # lo reemplazan: docker compose las lee del entorno al resolver cada ${VAR}.
+      # REGLA: el nombre de la izquierda debe ser IDÉNTICO al ${VAR} que lee
+      # docker-compose.yaml. Un typo llega vacío sin ningún aviso.
+      # Nota: los secrets AIRFLOW_WW_USER_* (dos W) se asignan a AIRFLOW_WWW_USER_*
+      # (tres W), que es lo que lee el compose.
+      # Nota sobre mayúsculas: el script docker/postgres/init-multiple-databases.sh
+      # crea usuarios y BDs sin comillas, así que Postgres los baja a minúsculas.
+      # Por eso *_USERNAME y *_NAME deben estar en MINÚSCULAS en los secrets.
+      # Nota sobre FERNET_KEY: debe ser una llave Fernet válida completa (44 caracteres,
+      # termina en `=`), sin comillas, espacios ni salto de línea.
       env:
         AIRFLOW_WWW_USER_PASSWORD: ${{secrets.AIRFLOW_WW_USER_PASSWORD}}
         AIRFLOW_WWW_USER_USERNAME: ${{secrets.AIRFLOW_WW_USER_USERNAME}}
@@ -58,6 +110,9 @@ jobs:
         METADATA_DATABASE_NAME: ${{secrets.METADATA_DATABASE_NAME}}
         METADATA_DATABASE_PASSWORD: ${{secrets.METADATA_DATABASE_PASSWORD}}
         METADATA_DATABASE_USERNAME: ${{secrets.METADATA_DATABASE_USERNAME}}
+        # PENDIENTE: las dos líneas POSTGRES_USER / POSTGRES_PASSWORD no se usan
+        # (el compose lee POSTGRES_CONN_USERNAME / POSTGRES_CONN_PASSWORD) y
+        # `secrets.POSTGRES_CONN_USER` no existe. Se pueden borrar.
         POSTGRES_USER: ${{secrets.POSTGRES_CONN_USER}}
         POSTGRES_PASSWORD: ${{secrets.POSTGRES_CONN_PASSWORD}}
         POSTGRES_CONN_HOST: ${{secrets.POSTGRES_CONN_HOST}}
@@ -68,11 +123,13 @@ jobs:
         CHANNEL_HANDLE: ${{vars.CHANNEL_HANDLE}}
         DOCKERHUB_NAMESPACE: ${{vars.DOCKERHUB_NAMESPACE}}
         DOCKERHUB_REPOSITORY: ${{vars.DOCKERHUB_REPOSITORY}}
+        # PENDIENTE: DOCKERHUB_USERNAME no lo lee el compose. Se puede borrar.
         DOCKERHUB_USERNAME: ${{vars.DOCKERHUB_USERNAME}}
-      
+
       steps:
         - name: Checkout code
           uses: actions/checkout@v7
+        # Decide si hay que probar: solo si cambió código de los DAGs, include/ o el compose.
         - name: Get changed files
           id: changed-files-tests
           uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.6
@@ -81,12 +138,18 @@ jobs:
                     dags/**
                     include/**
                     docker-compose.yaml
+        # Levanta Postgres, Redis, webserver, scheduler y worker (usa la imagen
+        # `latest` de Docker Hub). Si falla aquí, casi siempre es un nombre de
+        # variable mal escrito o un secret vacío/ inválido.
         - name: Set up Docker Compose
           if: steps.changed-files-tests.outputs.any_changed == 'true'
           run: docker compose up -d
+        # Pruebas unitarias e integración (carpeta tests/), dentro del contenedor worker.
         - name: Run Unit and Integration Test
           if: steps.changed-files-tests.outputs.any_changed == 'true'
           run: docker exec -t airflow-worker sh -c "pytest tests/ -v"
+        # Prueba end-to-end: ejecuta cada DAG completo con `airflow dags test`.
+        # Si algún DAG falla, el paso falla y el job queda en rojo.
         - name: Run End to END  Dag Tests
           if: steps.changed-files-tests.outputs.any_changed == 'true'
           run: |
@@ -94,6 +157,11 @@ jobs:
                 for DAG in "${DAG_NAMES[@]}"; do
                   docker exec -t airflow-worker sh -c "airflow dags test $DAG"
                 done
+        # PASO TEMPORAL DE DIAGNÓSTICO. Solo corre si algo falló (`failure()`).
+        # Sirvió para descubrir que el worker se caía por un rol de Postgres
+        # inexistente (usuario con mayúsculas), no por falta de memoria.
+        # No imprime valores de secrets: solo SI/no y 1/0.
+        # PENDIENTE: borrarlo o reducirlo cuando el pipeline sea estable.
         - name: Diagnostico si falla
           if: failure()
           run: |
@@ -118,7 +186,7 @@ jobs:
                   if [[ "$val" =~ [A-Z] ]]; then up=SI; else up=no; fi
                   echo "$v existe=$n mayusculas=$up"
                 done
+        # Apaga el stack. Se salta si algo falló (no importa: el runner se destruye al terminar).
         - name: Tear down Docker Compose
           if: steps.changed-files-tests.outputs.any_changed == 'true'
           run: docker compose down
-             
