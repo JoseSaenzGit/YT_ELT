@@ -50,12 +50,12 @@ x-airflow-common:
   # Resultado: josesaenzpersonal/yt_api_elt:1.0.1 (según IMAGE_TAG en el .env)
   # Al cambiar IMAGE_TAG hay que recrear los contenedores:
   #   docker compose up -d --force-recreate
-  image: ${DOCKERHUB_NAMESPACE}/${DOCKERHUB_REPOSITORY}:${IMAGE_TAG}
+  image: ${DOCKERHUB_NAMESPACE}/${DOCKERHUB_REPOSITORY}:latest
 
   # Lee todas las variables del archivo .env para no hardcodear credenciales.
   # NOTA: Desactivar esto cuando se use GitHub Actions (CI/CD).
-  env_file:
-    - .env
+  #env_file:
+  #  - .env
 
   environment:
     # Referencia a este bloque de variables para poder heredarlas en los workers
@@ -172,25 +172,25 @@ services:
     container_name: postgres
     image: postgres:13
     # Lee credenciales del .env. DESACTIVAR cuando se use GitHub Actions.
-    env_file:
-      - .env
+    #env_file:
+    #  - .env
     # Usuario y contraseña raíz de Postgres (el superusuario del servidor).
     # Las credenciales de cada BD individual las maneja el script de init.
     # Las líneas comentadas son para CI/CD con GitHub Actions.
     environment:
       - POSTGRES_USER=${POSTGRES_CONN_USERNAME}
       - POSTGRES_PASSWORD=${POSTGRES_CONN_PASSWORD}
-    #   - METADATA_DATABASE_NAME=${METADATA_DATABASE_NAME}
-    #   - METADATA_DATABASE_USERNAME=${METADATA_DATABASE_USERNAME}
-    #   - METADATA_DATABASE_PASSWORD=${METADATA_DATABASE_PASSWORD}
-    #   - ELT_DATABASE_NAME=${ELT_DATABASE_NAME}
-    #   - ELT_DATABASE_USERNAME=${ELT_DATABASE_USERNAME}
-    #   - ELT_DATABASE_PASSWORD=${ELT_DATABASE_PASSWORD}
-    #   - CELERY_BACKEND_NAME=${CELERY_BACKEND_NAME}
-    #   - CELERY_BACKEND_USERNAME=${CELERY_BACKEND_USERNAME}
-    #   - CELERY_BACKEND_PASSWORD=${CELERY_BACKEND_PASSWORD}
-    #   - POSTGRES_CONN_HOST=${POSTGRES_CONN_HOST}
-    #   - POSTGRES_CONN_PORT=${POSTGRES_CONN_PORT}
+      - METADATA_DATABASE_NAME=${METADATA_DATABASE_NAME}
+      - METADATA_DATABASE_USERNAME=${METADATA_DATABASE_USERNAME}
+      - METADATA_DATABASE_PASSWORD=${METADATA_DATABASE_PASSWORD}
+      - ELT_DATABASE_NAME=${ELT_DATABASE_NAME}
+      - ELT_DATABASE_USERNAME=${ELT_DATABASE_USERNAME}
+      - ELT_DATABASE_PASSWORD=${ELT_DATABASE_PASSWORD}
+      - CELERY_BACKEND_NAME=${CELERY_BACKEND_NAME}
+      - CELERY_BACKEND_USERNAME=${CELERY_BACKEND_USERNAME}
+      - CELERY_BACKEND_PASSWORD=${CELERY_BACKEND_PASSWORD}
+      - POSTGRES_CONN_HOST=${POSTGRES_CONN_HOST}
+      - POSTGRES_CONN_PORT=${POSTGRES_CONN_PORT}
     # Puerto 5432 del Mac mapeado al 5432 del contenedor (puerto estándar de Postgres).
     # Esto permite conectarte desde tu Mac con DBeaver, TablePlus, etc.
     ports:
