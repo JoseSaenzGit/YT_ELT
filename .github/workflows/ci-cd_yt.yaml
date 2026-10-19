@@ -97,12 +97,18 @@ jobs:
         - name: Diagnostico si falla
           if: failure()
           run: |
-                free -m
-                docker ps -a
-                docker inspect airflow-worker --format 'OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}} Restarts={{.RestartCount}}'
-                docker stats --no-stream
-                sudo dmesg | grep -i -E "out of memory|killed process" || echo "dmesg: sin eventos OOM"
-                docker logs airflow-worker --tail 40
+                docker inspect airflow-worker --format 'StartedAt={{.State.StartedAt}} FinishedAt={{.State.FinishedAt}} Restarts={{.RestartCount}}'
+                echo "---- LOG POSTGRES ----"
+                docker logs postgres --tail 80 2>&1 | grep -i -E "fatal|detail|error" || echo "sin errores en postgres"
+                echo "---- LOG WORKER ----"
+                docker logs airflow-worker 2>&1 | head -80
+                echo "---- FORMATO DE CREDENCIALES (solo si/no) ----"
+                for v in CELERY_BACKEND_USERNAME CELERY_BACKEND_PASSWORD METADATA_DATABASE_USERNAME METADATA_DATABASE_PASSWORD ELT_DATABASE_USERNAME ELT_DATABASE_PASSWORD POSTGRES_CONN_USERNAME POSTGRES_CONN_PASSWORD; do
+                  val="${!v}"
+                  if [[ "$val" =~ [[:space:]] ]]; then ws=SI; else ws=no; fi
+                  if [[ "$val" =~ [^A-Za-z0-9_] ]]; then sp=SI; else sp=no; fi
+                  echo "$v espacios=$ws especiales=$sp"
+                done
         - name: Tear down Docker Compose
           if: steps.changed-files-tests.outputs.any_changed == 'true'
           run: docker compose down
