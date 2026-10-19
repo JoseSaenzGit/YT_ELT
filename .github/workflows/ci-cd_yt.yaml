@@ -109,6 +109,15 @@ jobs:
                   if [[ "$val" =~ [^A-Za-z0-9_] ]]; then sp=SI; else sp=no; fi
                   echo "$v espacios=$ws especiales=$sp"
                 done
+                echo "---- SCRIPT INIT DE POSTGRES ----"
+                docker logs postgres 2>&1 | grep -E "Creating user|created successfully|already exists" || echo "sin lineas del script init"
+                echo "---- EXISTE EL ROL EN POSTGRES? (1=si, 0=no) ----"
+                for v in METADATA_DATABASE_USERNAME CELERY_BACKEND_USERNAME ELT_DATABASE_USERNAME; do
+                  val="${!v}"
+                  n=$(echo "SELECT count(*) FROM pg_roles WHERE rolname = :'u'" | docker exec -i postgres psql -U "$POSTGRES_CONN_USERNAME" -d postgres -v u="$val" -tA)
+                  if [[ "$val" =~ [A-Z] ]]; then up=SI; else up=no; fi
+                  echo "$v existe=$n mayusculas=$up"
+                done
         - name: Tear down Docker Compose
           if: steps.changed-files-tests.outputs.any_changed == 'true'
           run: docker compose down
